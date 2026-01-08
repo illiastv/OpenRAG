@@ -85,6 +85,41 @@ class CodeRAG:
         # gpt-4o-mini - cheap version of GPT-4
         self.llm_model = "gpt-4o-mini"
         
+        # Default prompt templates (can be customized)
+        self.system_prompt = "You are a helpful code assistant that explains code clearly."
+        self.context_template = """[Code Snippet {i}] (Relevance: {score:.3f})
+File: {path}
+Lines: {lines}
+```{extension}
+{text}
+```"""
+        self.user_prompt_template = """You are an expert code assistant. Help the user understand their codebase.
+
+Based on the following code snippets from the codebase, answer the user's question.
+
+Code Context:
+{context}
+
+User Question: {query}
+
+Please provide a clear, helpful answer. Reference specific files and line numbers when relevant.
+
+Answer:"""
+        
+        # Analytics tracking
+        self.analytics = {
+            "total_queries": 0,
+            "total_tokens_used": 0,
+            "total_cost": 0.0,
+            "total_embedding_cost": 0.0,
+            "total_generation_cost": 0.0,
+            "query_history": []
+        }
+        
+        # Chunking strategy settings
+        self.chunking_strategy = "lines"  # "lines", "functions", "files"
+        self.chunk_size = 1000
+        
         # File extensions we will read
         # You can add your own: ".java", ".go", ".rs", etc.
         self.code_extensions = {
@@ -272,43 +307,61 @@ class CodeRAG:
     
     # ========== STEP 2: CODE CHUNKING ==========
     
-    def chunk_code_file(self, file_info: Dict, chunk_size: int = 1000) -> List[Dict]:
+    def chunk_code_file(self, file_info: Dict, chunk_size: int = None, strategy: str = None) -> List[Dict]:
         """
-        Split code file into chunks.
-        For code it's better to split by functions/classes, but for simplicity
-        we use line-based splitting with smart boundary selection.
+        Split code file into chunks using different strategies.
         
         Args:
             file_info: file information (from scan_directory)
-            chunk_size: chunk size in characters
+            chunk_size: chunk size in characters (uses self.chunk_size if None)
+            strategy: chunking strategy - "lines", "functions", "files" (uses self.chunking_strategy if None)
             
         Returns:
             list of chunks with metadata
         """
         
-        # Get file contents
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+        if strategy is None:
+            strategy = self.chunking_strategy
+        
         content = file_info["content"]
         
-        # split('\n') - splits text into lines by newline
+        # Strategy: whole file as one chunk
+        if strategy == "files":
+            return [{
+                "chunk_id": 0,
+                "text": content,
+                "filename": file_info["filename"],
+                "relative_path": file_info["relative_path"],
+                "extension": file_info["extension"],
+                "start_line": 0,
+                "end_line": len(content.split('\n')),
+                "size": len(content)
+            }]
+        
+        # Strategy: by functions/classes (basic implementation)
+        if strategy == "functions":
+            return self._chunk_by_functions(file_info, chunk_size)
+        
+        # Strategy: by lines (default)
+        return self._chunk_by_lines(file_info, chunk_size)
+    
+    def _chunk_by_lines(self, file_info: Dict, chunk_size: int) -> List[Dict]:
+        """Chunk file by lines with size limit."""
+        content = file_info["content"]
         lines = content.split('\n')
         
         chunks = []
-        current_chunk_lines = []  # lines of current chunk
-        current_chunk_size = 0    # size of current chunk
+        current_chunk_lines = []
+        current_chunk_size = 0
         chunk_id = 0
         
-        # Iterate through all lines
         for line_num, line in enumerate(lines):
-            
-            # Line size + 1 (for newline)
             line_size = len(line) + 1
             
-            # If adding this line would exceed chunk_size
             if current_chunk_size + line_size > chunk_size and current_chunk_lines:
-                
-                # Save current chunk
                 chunk_text = '\n'.join(current_chunk_lines)
-                
                 chunks.append({
                     "chunk_id": chunk_id,
                     "text": chunk_text,
@@ -319,17 +372,13 @@ class CodeRAG:
                     "end_line": line_num,
                     "size": len(chunk_text)
                 })
-                
-                # Start new chunk
                 chunk_id += 1
                 current_chunk_lines = [line]
                 current_chunk_size = line_size
             else:
-                # Add line to current chunk
                 current_chunk_lines.append(line)
                 current_chunk_size += line_size
         
-        # Don't forget last chunk
         if current_chunk_lines:
             chunk_text = '\n'.join(current_chunk_lines)
             chunks.append({
@@ -344,6 +393,66 @@ class CodeRAG:
             })
         
         return chunks
+    
+    def _chunk_by_functions(self, file_info: Dict, chunk_size: int) -> List[Dict]:
+        """Chunk file by functions/classes (basic regex-based implementation)."""
+        import re
+        content = file_info["content"]
+        extension = file_info["extension"]
+        
+        chunks = []
+        chunk_id = 0
+        
+        # Patterns for different languages
+        patterns = {
+            '.py': r'(def\s+\w+|class\s+\w+)',
+            '.js': r'(function\s+\w+|const\s+\w+\s*=\s*\(|class\s+\w+)',
+            '.ts': r'(function\s+\w+|const\s+\w+\s*=\s*\(|class\s+\w+)',
+            '.java': r'(public|private|protected)?\s*(static)?\s*(class|interface|enum)\s+\w+|(public|private|protected)\s+.*\s+\w+\s*\(',
+        }
+        
+        pattern = patterns.get(extension, r'(def\s+\w+|class\s+\w+|function\s+\w+)')
+        matches = list(re.finditer(pattern, content))
+        
+        if not matches:
+            # Fallback to line-based if no functions found
+            return self._chunk_by_lines(file_info, chunk_size)
+        
+        # Split by function boundaries
+        for i, match in enumerate(matches):
+            start_pos = match.start()
+            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+            
+            chunk_text = content[start_pos:end_pos].strip()
+            if len(chunk_text) > chunk_size:
+                # If function is too large, split it further
+                sub_chunks = self._chunk_by_lines({
+                    "content": chunk_text,
+                    "filename": file_info["filename"],
+                    "relative_path": file_info["relative_path"],
+                    "extension": file_info["extension"]
+                }, chunk_size)
+                for sub_chunk in sub_chunks:
+                    sub_chunk["chunk_id"] = chunk_id
+                    sub_chunk["start_line"] += content[:start_pos].count('\n')
+                    chunks.append(sub_chunk)
+                    chunk_id += 1
+            else:
+                start_line = content[:start_pos].count('\n')
+                end_line = content[:end_pos].count('\n')
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "text": chunk_text,
+                    "filename": file_info["filename"],
+                    "relative_path": file_info["relative_path"],
+                    "extension": file_info["extension"],
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "size": len(chunk_text)
+                })
+                chunk_id += 1
+        
+        return chunks if chunks else self._chunk_by_lines(file_info, chunk_size)
     
     
     # ========== STEP 3: EMBEDDINGS ==========
@@ -373,7 +482,13 @@ class CodeRAG:
         # List comprehension iterates through all elements and gets embedding
         embeddings = [item.embedding for item in response.data]
         
-        print(f"✅ Got {len(embeddings)} embeddings")
+        # Track embedding costs (text-embedding-3-small: $0.02 per 1M tokens)
+        tokens_used = response.usage.total_tokens
+        embedding_cost = (tokens_used / 1_000_000) * 0.02
+        self.analytics["total_embedding_cost"] += embedding_cost
+        self.analytics["total_cost"] += embedding_cost
+        
+        print(f"✅ Got {len(embeddings)} embeddings ({tokens_used} tokens, ${embedding_cost:.4f})")
         
         return embeddings
     
@@ -411,8 +526,8 @@ class CodeRAG:
         
         # Iterate through each file
         for file_info in files:
-            # Split file into chunks
-            file_chunks = self.chunk_code_file(file_info, chunk_size=chunk_size)
+            # Split file into chunks using current strategy
+            file_chunks = self.chunk_code_file(file_info, chunk_size=chunk_size, strategy=self.chunking_strategy)
             
             # Add chunks to general list
             all_chunks.extend(file_chunks)
@@ -558,113 +673,189 @@ class CodeRAG:
     
     # ========== STEP 6: ANSWER GENERATION ==========
     
-    def generate_answer(self, query: str, search_results: List[Dict]) -> Dict:
+    def generate_answer(self, query: str, search_results: List[Dict], 
+                       system_prompt: str = None, 
+                       context_template: str = None,
+                       user_prompt_template: str = None) -> Dict:
         """
-        Generate answer based on found code chunks
+        Generate answer based on found code chunks with customizable prompts
         
         Args:
             query: user question
             search_results: found code chunks
+            system_prompt: custom system prompt (uses self.system_prompt if None)
+            context_template: custom context template (uses self.context_template if None)
+            user_prompt_template: custom user prompt template (uses self.user_prompt_template if None)
             
         Returns:
             answer and full prompt
         """
         
+        import time
+        start_time = time.time()
+        
         print(f"💬 Generating answer with LLM...")
         
-        # 1. Form context from found files
+        # Use custom prompts or defaults
+        system_prompt = system_prompt or self.system_prompt
+        context_template = context_template or self.context_template
+        user_prompt_template = user_prompt_template or self.user_prompt_template
+        
+        # 1. Form context from found files using template
         context_parts = []
         
         for i, result in enumerate(search_results):
-            # Format each chunk nicely
-            context_part = f"""
-[Code Snippet {i+1}] (Relevance: {result['score']:.3f})
-File: {result['path']}
-Lines: {result['lines']}
-```{result['extension'][1:]}  
-{result['text']}
-```
-"""
+            # Format each chunk using template
+            context_part = context_template.format(
+                i=i+1,
+                score=result['score'],
+                path=result['path'],
+                lines=result['lines'],
+                extension=result['extension'][1:],
+                text=result['text']
+            )
             context_parts.append(context_part)
         
-        # join() - joins list of strings into one string
-        # '\n' between elements = empty line between chunks
         context = '\n'.join(context_parts)
         
-        # 2. Form full prompt for LLM
-        # f-string allows inserting variables via {variable}
-        full_prompt = f"""You are an expert code assistant. Help the user understand their codebase.
-
-Based on the following code snippets from the codebase, answer the user's question.
-
-Code Context:
-{context}
-
-User Question: {query}
-
-Please provide a clear, helpful answer. Reference specific files and line numbers when relevant.
-
-Answer:"""
+        # 2. Form full prompt using template
+        full_prompt = user_prompt_template.format(
+            context=context,
+            query=query
+        )
         
         # 3. Call GPT to generate answer
         response = self.openai_client.chat.completions.create(
-            model=self.llm_model,  # which model to use
-            
-            # messages - list of messages (chat history)
+            model=self.llm_model,
             messages=[
                 {
-                    "role": "system",  # system message (assistant role)
-                    "content": "You are a helpful code assistant that explains code clearly."
+                    "role": "system",
+                    "content": system_prompt
                 },
                 {
-                    "role": "user",    # user message
+                    "role": "user",
                     "content": full_prompt
                 }
             ],
-            
-            # temperature - creativity (0 = deterministic, 1 = creative)
             temperature=0.3
         )
         
-        # Extract answer from response
-        # response.choices[0] - first (and only) answer option
-        # .message.content - answer text
+        # Extract answer
         answer = response.choices[0].message.content
         
-        print(f"✅ Answer generated ({len(answer)} chars)")
+        # Calculate costs and track analytics
+        generation_time = time.time() - start_time
+        tokens_used = response.usage.total_tokens
+        prompt_tokens = response.usage.prompt_tokens
+        completion_tokens = response.usage.completion_tokens
+        
+        # Cost calculation (approximate for gpt-4o-mini)
+        cost_per_1k_prompt = 0.15 / 1000  # $0.15 per 1M tokens
+        cost_per_1k_completion = 0.60 / 1000  # $0.60 per 1M tokens
+        generation_cost = (prompt_tokens * cost_per_1k_prompt) + (completion_tokens * cost_per_1k_completion)
+        
+        # Update analytics
+        self.analytics["total_queries"] += 1
+        self.analytics["total_tokens_used"] += tokens_used
+        self.analytics["total_generation_cost"] += generation_cost
+        self.analytics["total_cost"] += generation_cost
+        self.analytics["query_history"].append({
+            "query": query,
+            "tokens": tokens_used,
+            "cost": generation_cost,
+            "time": generation_time,
+            "timestamp": time.time()
+        })
+        
+        print(f"✅ Answer generated ({len(answer)} chars, {tokens_used} tokens, ${generation_cost:.4f}, {generation_time:.2f}s)")
         
         return {
             "answer": answer,
-            "full_prompt": full_prompt
+            "full_prompt": full_prompt,
+            "system_prompt": system_prompt,
+            "tokens_used": tokens_used,
+            "cost": generation_cost,
+            "generation_time": generation_time
         }
     
     
     # ========== FULL RAG PIPELINE ==========
     
-    def ask(self, question: str, top_k: int = 5) -> Dict:
+    def ask(self, question: str, top_k: int = 5, 
+            system_prompt: str = None,
+            context_template: str = None,
+            user_prompt_template: str = None) -> Dict:
         """
-        Full RAG: search + answer generation
+        Full RAG: search + answer generation with customizable prompts
         
         Args:
             question: question about codebase
             top_k: how many chunks to use for context
+            system_prompt: custom system prompt
+            context_template: custom context template
+            user_prompt_template: custom user prompt template
             
         Returns:
             full result with answer and all details
         """
+        import time
+        total_start = time.time()
         
         # 1. Search for relevant code
         search_results = self.search(question, top_k=top_k)
         
-        # 2. Generate answer
-        generation_result = self.generate_answer(question, search_results)
+        # 2. Generate answer with custom prompts
+        generation_result = self.generate_answer(
+            question, 
+            search_results,
+            system_prompt=system_prompt,
+            context_template=context_template,
+            user_prompt_template=user_prompt_template
+        )
+        
+        total_time = time.time() - total_start
         
         # 3. Return everything together
         return {
             "question": question,
             "answer": generation_result["answer"],
             "retrieved_chunks": search_results,
-            "full_prompt": generation_result["full_prompt"]
+            "full_prompt": generation_result["full_prompt"],
+            "system_prompt": generation_result.get("system_prompt", self.system_prompt),
+            "tokens_used": generation_result.get("tokens_used", 0),
+            "cost": generation_result.get("cost", 0),
+            "generation_time": generation_result.get("generation_time", 0),
+            "total_time": total_time
+        }
+    
+    def set_prompts(self, system_prompt: str = None, 
+                    context_template: str = None,
+                    user_prompt_template: str = None):
+        """Update prompt templates."""
+        if system_prompt:
+            self.system_prompt = system_prompt
+        if context_template:
+            self.context_template = context_template
+        if user_prompt_template:
+            self.user_prompt_template = user_prompt_template
+    
+    def set_chunking_strategy(self, strategy: str, chunk_size: int = None):
+        """Set chunking strategy and size."""
+        if strategy in ["lines", "functions", "files"]:
+            self.chunking_strategy = strategy
+        if chunk_size:
+            self.chunk_size = chunk_size
+    
+    def get_analytics(self) -> Dict:
+        """Get analytics summary."""
+        return {
+            "total_queries": self.analytics["total_queries"],
+            "total_tokens": self.analytics["total_tokens_used"],
+            "total_cost": self.analytics["total_cost"],
+            "embedding_cost": self.analytics["total_embedding_cost"],
+            "generation_cost": self.analytics["total_generation_cost"],
+            "avg_cost_per_query": self.analytics["total_cost"] / max(self.analytics["total_queries"], 1),
+            "recent_queries": self.analytics["query_history"][-10:]  # Last 10 queries
         }
 
 
