@@ -380,12 +380,13 @@ class CodeRAG:
     
     # ========== STEP 4: INDEXING ==========
     
-    def index_codebase(self, directory_path: str) -> Dict:
+    def index_codebase(self, directory_path: str, chunk_size: int = 1000) -> Dict:
         """
         Full codebase indexing pipeline
         
         Args:
             directory_path: path to code folder
+            chunk_size: size of chunks in characters (default: 1000)
             
         Returns:
             indexing statistics
@@ -394,6 +395,7 @@ class CodeRAG:
         print(f"\n{'='*60}")
         print(f"🚀 STARTING CODEBASE INDEXING")
         print(f"{'='*60}\n")
+        print(f"📏 Using chunk size: {chunk_size} characters")
         
         # 1. Scan directory
         files = self.scan_directory(directory_path)
@@ -410,7 +412,7 @@ class CodeRAG:
         # Iterate through each file
         for file_info in files:
             # Split file into chunks
-            file_chunks = self.chunk_code_file(file_info, chunk_size=1000)
+            file_chunks = self.chunk_code_file(file_info, chunk_size=chunk_size)
             
             # Add chunks to general list
             all_chunks.extend(file_chunks)
