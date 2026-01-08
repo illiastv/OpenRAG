@@ -24,6 +24,29 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from dotenv import load_dotenv
 
 
+# ========== GLOBAL QDRANT CLIENT CACHE ==========
+
+# Global dictionary to store Qdrant clients by path
+# This prevents "already accessed" errors when multiple instances try to use the same path
+_qdrant_clients = {}
+
+
+def _get_qdrant_client(qdrant_path: str) -> QdrantClient:
+    """
+    Get or create Qdrant client for a given path.
+    Reuses existing client if one already exists for this path.
+    
+    Args:
+        qdrant_path: path to Qdrant storage
+        
+    Returns:
+        QdrantClient instance
+    """
+    if qdrant_path not in _qdrant_clients:
+        _qdrant_clients[qdrant_path] = QdrantClient(path=qdrant_path)
+    return _qdrant_clients[qdrant_path]
+
+
 # ========== RAG SYSTEM CLASS ==========
 
 class CodeRAG:
@@ -46,9 +69,10 @@ class CodeRAG:
         # All variables with self. are accessible in all class methods
         self.openai_client = OpenAI(api_key=openai_api_key)
         
-        # Create Qdrant client
+        # Create or reuse Qdrant client
+        # Uses global cache to prevent "already accessed" errors
         # path: means local storage (not in cloud)
-        self.qdrant_client = QdrantClient(path=qdrant_path)
+        self.qdrant_client = _get_qdrant_client(qdrant_path)
         
         # Collection name (like a table in a regular database)
         self.collection_name = "code_base"
@@ -481,12 +505,24 @@ class CodeRAG:
         # 2. Search for similar vectors in Qdrant
         print(f"🔎 Searching in vector database...")
         
-        # search() - finds nearest vectors
-        search_results = self.qdrant_client.search(
-            collection_name=self.collection_name,  # where to search
-            query_vector=query_embedding,          # query vector
-            limit=top_k                            # how many results
-        )
+        try:
+            # Try the newest API first (qdrant-client 1.8+)
+            search_results = self.qdrant_client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,  # Changed from query_vector to query
+                limit=top_k
+            ).points
+        except (TypeError, AttributeError) as e:
+            try:
+                # Fallback to older search method
+                search_results = self.qdrant_client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_embedding,
+                    limit=top_k
+                )
+            except Exception as e2:
+                print(f"❌ Search error: {e2}")
+                raise
         
         # 3. Format results
         results = []
@@ -718,5 +754,3 @@ if __name__ == "__main__":
             print("FULL PROMPT")
             print("="*60)
             print(result["full_prompt"])
-
-###OPENAI_API_KEY=sk-your-key-here
