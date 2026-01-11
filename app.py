@@ -1,134 +1,227 @@
 import streamlit as st
 import uuid
+import os
+from dotenv import load_dotenv
 from rag_core import ContextEngine
 
-st.set_page_config(page_title="Universal Context Builder", page_icon="📚", layout="wide")
+# Загружаем .env
+load_dotenv()
+
+st.set_page_config(page_title="BookMind", page_icon="📚", layout="wide")
 
 # Инициализация сессии
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())[:8]
-if "selected_snippets" not in st.session_state:
-    st.session_state.selected_snippets = []
-if "indexed" not in st.session_state:
-    st.session_state.indexed = False
-if "last_search" not in st.session_state:
-    st.session_state.last_search = []
+if "uploaded_files_list" not in st.session_state:
+    st.session_state.uploaded_files_list = []
+if "active_files" not in st.session_state:
+    st.session_state.active_files = set()
+if "search_results" not in st.session_state:
+    st.session_state.search_results = []
+if "selected_result" not in st.session_state:
+    st.session_state.selected_result = None
 
-# --- SIDEBAR: НАСТРОЙКИ ---
-with st.sidebar:
-    st.header("🔑 Settings")
-    openai_key = st.text_input("OpenAI API Key", type="password", help="Needed for embeddings")
-    st.caption("⚠️ Using In-Memory Storage (Data lost on refresh)")
-
-# --- MAIN ---
-st.title("📚 Context Builder: Code & Docs")
-st.markdown("Upload **PDFs** or **Code**, search intelligently, and get context.")
+# Читаем API ключ из .env
+openai_key = os.getenv("OPENAI_API_KEY")
 
 if not openai_key:
-    st.warning("👈 Please enter your OpenAI API Key in the sidebar to start.")
+    st.error("❌ OPENAI_API_KEY не найден в .env файле!")
     st.stop()
 
-# Инициализация движка (всегда локально)
+# Инициализация движка (пересоздаем каждый раз для обновления кода)
 try:
+    engine = ContextEngine(openai_key)
     if "engine" not in st.session_state:
-        st.session_state.engine = ContextEngine(openai_key)
-    engine = st.session_state.engine
+        st.session_state.engine = engine
 except Exception as e:
-    st.error(f"Connection Error: {e}")
+    st.error(f"Ошибка инициализации: {e}")
     st.stop()
+engine = st.session_state.engine
 
-# 1. ЗАГРУЗКА ФАЙЛОВ
-st.subheader("📤 1. Upload Documents or Code")
-uploaded_files = st.file_uploader(
-    "Supported: .pdf, .py, .js, .txt, .md, etc.", 
-    accept_multiple_files=True
-)
+# === LAYOUT: 3 колонки ===
+left_col, center_col, right_col = st.columns([1.5, 3, 1.5])
 
-if uploaded_files:
-    if st.button("🚀 Index Files", type="primary"):
-        with st.spinner("Processing PDF/Code & Embedding..."):
-            try:
-                count = engine.process_and_index(uploaded_files, st.session_state.session_id)
-                st.session_state.indexed = True
-                st.success(f"✅ Indexed {len(uploaded_files)} files ({count} chunks) into knowledge base!")
-            except Exception as e:
-                st.error(f"Indexing error: {e}")
-
-st.divider()
-
-# 2. ПОИСК
-st.subheader("🔍 2. Search Your Documents")
-query = st.text_input("What do you need context for?", placeholder="e.g. 'How does authentication work?' or 'Summary of Chapter 4'")
-
-if query and st.button("🔎 Find Context", type="primary"):
-    if not st.session_state.indexed:
-        st.warning("⚠️ Please index files first!")
-    else:
-        with st.spinner("Searching..."):
-            try:
-                results = engine.search(query, st.session_state.session_id, limit=10)
-                st.session_state.last_search = results
-                if not results:
-                    st.warning("No results found. Try different keywords.")
-            except Exception as e:
-                st.error(f"Search error: {e}")
-
-st.divider()
-
-# 3. ПОКАЗ РЕЗУЛЬТАТОВ И ВЫБОР
-if st.session_state.last_search:
-    st.subheader("✅ 3. Select Snippets")
+# === ЛЕВАЯ ПАНЕЛЬ: БИБЛИОТЕКА ===
+with left_col:
+    st.header("📚 Библиотека")
     
-    for idx, res in enumerate(st.session_state.last_search):
-        snippet_id = f"{res['filename']}_{res['chunk_id']}"
-        is_checked = snippet_id in [s['id'] for s in st.session_state.selected_snippets]
+    if st.session_state.uploaded_files_list:
+        st.caption(f"Загружено файлов: {len(st.session_state.uploaded_files_list)}")
         
-        with st.container(border=True):
-            col1, col2 = st.columns([0.08, 0.92])
+        for idx, file_info in enumerate(st.session_state.uploaded_files_list):
+            filename = file_info["name"]
             
-            with col1:
-                toggle = st.checkbox("", key=f"chk_{idx}_{snippet_id}", value=is_checked)
-            
-            with col2:
-                st.markdown(f"**📄 {res['filename']}** | Relevance: `{res['score']:.3f}`")
-                preview = res['text'][:300] + "..." if len(res['text']) > 300 else res['text']
-                st.text(preview)
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([0.1, 0.6, 0.3])
                 
-                with st.expander("Show full text"):
-                    st.code(res['text'], language="text")
+                # Чекбокс для включения/выключения
+                with col1:
+                    is_active = st.checkbox(
+                        "✓", 
+                        value=filename in st.session_state.active_files,
+                        key=f"active_{idx}_{filename}",
+                        label_visibility="collapsed"
+                    )
+                    
+                    if is_active and filename not in st.session_state.active_files:
+                        st.session_state.active_files.add(filename)
+                    elif not is_active and filename in st.session_state.active_files:
+                        st.session_state.active_files.discard(filename)
+                
+                # Название файла
+                with col2:
+                    icon = "📕" if filename.endswith('.pdf') else "📄"
+                    st.write(f"{icon} {filename[:20]}..." if len(filename) > 20 else f"{icon} {filename}")
+                
+                # Кнопка удаления
+                with col3:
+                    if st.button("🗑️", key=f"del_{idx}_{filename}"):
+                        st.session_state.uploaded_files_list.pop(idx)
+                        st.session_state.active_files.discard(filename)
+                        st.rerun()
+    else:
+        st.info("👈 Загрузите файлы справа")
 
-            # Логика добавления в корзину
-            if toggle and not is_checked:
-                st.session_state.selected_snippets.append({
-                    "id": snippet_id, 
-                    "text": res['text'], 
-                    "file": res['filename']
-                })
-            elif not toggle and is_checked:
-                st.session_state.selected_snippets = [
-                    s for s in st.session_state.selected_snippets if s['id'] != snippet_id
-                ]
+# === ЦЕНТРАЛЬНАЯ ПАНЕЛЬ: ПОИСК И РЕЗУЛЬТАТЫ ===
+with center_col:
+    st.header("🔍 Поиск по книгам")
+    
+    # Поле поиска
+    query = st.text_input(
+        "Что вы ищете?", 
+        placeholder="Например: 'Что автор пишет о свободе?'",
+        label_visibility="collapsed"
+    )
+    
+    # Кнопка поиска
+    if st.button("🔎 Найти", type="primary", use_container_width=True):
+        if not st.session_state.uploaded_files_list:
+            st.warning("⚠️ Сначала загрузите файлы!")
+        elif not st.session_state.active_files:
+            st.warning("⚠️ Выберите хотя бы один файл для поиска!")
+        elif not query:
+            st.warning("⚠️ Введите поисковый запрос!")
+        else:
+            with st.spinner("Ищу..."):
+                try:
+                    results = engine.search(
+                        query, 
+                        st.session_state.session_id, 
+                        limit=15,
+                        filter_files=list(st.session_state.active_files)
+                    )
+                    st.session_state.search_results = results
+                    if not results:
+                        st.warning("Ничего не найдено. Попробуйте другие слова.")
+                except Exception as e:
+                    st.error(f"Ошибка поиска: {e}")
+    
+    st.divider()
+    
+    # Показываем результаты
+    if st.session_state.search_results:
+        st.subheader(f"Найдено: {len(st.session_state.search_results)} цитат")
+        
+        for idx, result in enumerate(st.session_state.search_results):
+            with st.container(border=True):
+                # Заголовок
+                col1, col2 = st.columns([0.8, 0.2])
+                with col1:
+                    st.markdown(f"**📄 {result['filename']}** | Страница {result.get('page', '?')}")
+                with col2:
+                    st.caption(f"Релевантность: {result['score']:.2f}")
+                
+                # Превью текста
+                preview = result['text'][:400] + "..." if len(result['text']) > 400 else result['text']
+                st.write(preview)
+                
+                # Кнопки действий
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("📖 Открыть полностью", key=f"open_{idx}"):
+                        st.session_state.selected_result = result
+                with col2:
+                    if st.button("📋 Копировать цитату", key=f"copy_{idx}"):
+                        citation = f'"{result["text"]}"\n\n— {result["filename"]}, стр. {result.get("page", "?")}'
+                        st.code(citation, language="text")
+                        st.success("✅ Скопируйте текст выше")
+                with col3:
+                    # Placeholder для будущего "Открыть в PDF"
+                    st.button("📕 В PDF", key=f"pdf_{idx}", disabled=True)
+    
+    # Модальное окно с полным текстом
+    if st.session_state.selected_result:
+        st.divider()
+        st.subheader("📖 Полный фрагмент")
+        
+        result = st.session_state.selected_result
+        st.markdown(f"**Источник:** {result['filename']}, страница {result.get('page', '?')}")
+        st.text_area(
+            "Текст", 
+            value=result['text'], 
+            height=300,
+            label_visibility="collapsed"
+        )
+        
+        if st.button("❌ Закрыть"):
+            st.session_state.selected_result = None
+            st.rerun()
 
-# 4. ФИНАЛЬНЫЙ КОНТЕКСТ
-st.divider()
-st.subheader("📋 4. Your Context (Copy & Paste)")
-
-if st.session_state.selected_snippets:
-    total_chars = sum([len(s['text']) for s in st.session_state.selected_snippets])
-    st.info(f"📊 Selected {len(st.session_state.selected_snippets)} snippets. Approx **{total_chars // 4} tokens**.")
+# === ПРАВАЯ ПАНЕЛЬ: УПРАВЛЕНИЕ ===
+with right_col:
+    st.header("⚙️ Управление")
     
-    # Формируем итоговый промпт
-    final_prompt = "I have the following context documents:\n\n"
-    for item in st.session_state.selected_snippets:
-        final_prompt += f"--- Source: {item['file']} ---\n{item['text']}\n\n"
+    # Загрузка файлов
+    with st.expander("➕ Добавить файлы", expanded=True):
+        uploaded_files = st.file_uploader(
+            "PDF, TXT, MD, PY, JS...",
+            accept_multiple_files=True,
+            label_visibility="collapsed"
+        )
+        
+        if uploaded_files and st.button("📥 Загрузить", use_container_width=True):
+            # Добавляем в список
+            for file in uploaded_files:
+                if file.name not in [f["name"] for f in st.session_state.uploaded_files_list]:
+                    st.session_state.uploaded_files_list.append({
+                        "name": file.name,
+                        "file": file
+                    })
+                    st.session_state.active_files.add(file.name)
+            st.success(f"✅ Добавлено файлов: {len(uploaded_files)}")
+            st.rerun()
     
-    if query:
-        final_prompt += f"My Request: {query}\n"
+    # Индексация
+    with st.expander("🔄 Индексировать базу"):
+        st.caption("Создает поисковый индекс из всех загруженных файлов")
+        
+        if st.button("🚀 Индексировать сейчас", type="primary", use_container_width=True):
+            if not st.session_state.uploaded_files_list:
+                st.warning("⚠️ Нет файлов для индексации!")
+            else:
+                with st.spinner("Обрабатываю файлы..."):
+                    try:
+                        files_to_index = [f["file"] for f in st.session_state.uploaded_files_list]
+                        count = engine.process_and_index(files_to_index, st.session_state.session_id)
+                        st.success(f"✅ Проиндексировано {count} фрагментов из {len(files_to_index)} файлов!")
+                    except Exception as e:
+                        st.error(f"Ошибка индексации: {e}")
     
-    st.text_area("📝 Final Context", value=final_prompt, height=400)
+    # Статистика
+    st.divider()
+    st.subheader("📊 Статистика")
+    st.metric("Файлов загружено", len(st.session_state.uploaded_files_list))
+    st.metric("Активных файлов", len(st.session_state.active_files))
+    st.metric("Результатов поиска", len(st.session_state.search_results))
     
-    if st.button("🗑️ Clear Selection"):
-        st.session_state.selected_snippets = []
+    # Сброс
+    if st.button("🗑️ Очистить всё", use_container_width=True):
+        st.session_state.uploaded_files_list = []
+        st.session_state.active_files = set()
+        st.session_state.search_results = []
+        st.session_state.selected_result = None
         st.rerun()
-else:
-    st.write("👆 Select snippets above to generate the final prompt.")
+
+# Футер
+st.divider()
+st.caption("💡 Совет: Включите только нужные книги для более точного поиска")
