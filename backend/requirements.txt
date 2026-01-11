@@ -1,6 +1,9 @@
-streamlit
+fastapi
+uvicorn
+python-multipart
 openai
 qdrant-client
 pypdf
 langchain-text-splitters
+python-dotenv
 tiktoken
