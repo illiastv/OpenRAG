@@ -1,0 +1,6 @@
+streamlit
+openai
+qdrant-client
+pypdf
+langchain-text-splitters
+tiktoken
