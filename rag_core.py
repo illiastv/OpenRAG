@@ -1,11 +1,11 @@
 import uuid
+import pickle  # <--- Добавлено для сохранения
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchAny
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 
 class ContextEngine:
     def __init__(self, openai_key: str):
@@ -33,9 +33,7 @@ class ContextEngine:
             return []
 
     def _extract_page_number(self, pdf_reader, page_index: int) -> int:
-        """Пытаемся извлечь реальный номер страницы"""
         try:
-            # Номер страницы = индекс + 1 (обычно)
             return page_index + 1
         except:
             return page_index + 1
@@ -60,7 +58,7 @@ class ContextEngine:
         for uploaded_file in files:
             text_content = ""
             file_name = uploaded_file.name
-            page_mapping = {}  # Маппинг chunk_id -> page_number
+            page_mapping = {}
             
             try:
                 if file_name.endswith('.pdf'):
@@ -71,7 +69,6 @@ class ContextEngine:
                         page_text = (page.extract_text() or "") + "\n"
                         page_num = self._extract_page_number(pdf_reader, page_idx)
                         
-                        # Запоминаем на какой странице какие символы
                         start_char = current_char_count
                         end_char = current_char_count + len(page_text)
                         
@@ -89,27 +86,19 @@ class ContextEngine:
             if not text_content.strip():
                 continue
 
-            # Нарезаем на куски
             chunks = self.splitter.split_text(text_content)
-            print(f"File: {file_name}, Chunks: {len(chunks)}")
-            
-            # Готовим векторы
             vectors = self._get_embeddings(chunks)
             
             if len(vectors) != len(chunks):
-                print(f"Warning: Vector count mismatch for {file_name}")
                 continue
             
-            # Определяем страницу для каждого чанка
             current_position = 0
             for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-                # Находим примерную страницу по позиции
                 page_num = None
                 if file_name.endswith('.pdf'):
-                    # Ищем ближайшую страницу
                     closest_pos = min(page_mapping.keys(), 
-                                     key=lambda x: abs(x - current_position),
-                                     default=None)
+                                      key=lambda x: abs(x - current_position),
+                                      default=None)
                     if closest_pos:
                         page_num = page_mapping[closest_pos]
                 
@@ -126,7 +115,6 @@ class ContextEngine:
                 total_chunks += 1
                 current_position += len(chunk)
 
-        # Загружаем в Qdrant батчами
         if all_points:
             batch_size = 100
             for i in range(0, len(all_points), batch_size):
@@ -134,29 +122,22 @@ class ContextEngine:
                     collection_name=collection_name,
                     points=all_points[i : i + batch_size]
                 )
-            print(f"Total indexed: {total_chunks} chunks")
             
         return total_chunks
 
     def search(self, query: str, session_id: str, limit: int = 5, filter_files: Optional[List[str]] = None):
         collection_name = f"sess_{session_id}"
-        
         try:
-            # Проверяем существование коллекции
             collections = self.qdrant.get_collections().collections
             if not any(c.name == collection_name for c in collections):
-                print(f"Collection {collection_name} не найдена")
                 return []
             
             query_vector = self._get_embeddings([query])
             if not query_vector:
-                print("Не удалось получить embedding для запроса")
                 return []
             
-            # Фильтр по файлам если указан
             query_filter = None
             if filter_files:
-                from qdrant_client.models import MatchAny
                 query_filter = Filter(
                     must=[
                         FieldCondition(
@@ -166,15 +147,12 @@ class ContextEngine:
                     ]
                 )
             
-            # Поиск
             hits = self.qdrant.query_points(
                 collection_name=collection_name,
                 query=query_vector[0],
                 limit=limit,
                 query_filter=query_filter
             ).points
-            
-            print(f"Found {len(hits)} results")
             
             return [
                 {
@@ -187,7 +165,69 @@ class ContextEngine:
                 for hit in hits
             ]
         except Exception as e:
-            print(f"Search error details: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Search error: {e}")
             return []
+
+    # === НОВЫЕ МЕТОДЫ ДЛЯ СОХРАНЕНИЯ ===
+    
+    def export_index(self, session_id: str) -> bytes:
+        """Выгружает всю коллекцию в bytes (pickle)"""
+        collection_name = f"sess_{session_id}"
+        try:
+            # Получаем все точки из базы
+            all_points = []
+            offset = None
+            while True:
+                points_batch, offset = self.qdrant.scroll(
+                    collection_name=collection_name,
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True
+                )
+                all_points.extend(points_batch)
+                if offset is None:
+                    break
+            
+            return pickle.dumps(all_points)
+        except Exception as e:
+            print(f"Export error: {e}")
+            return b""
+
+    def import_index(self, session_id: str, file_bytes: bytes) -> tuple[int, List[str]]:
+        """Загружает коллекцию из bytes. Возвращает кол-во чанков и список имен файлов."""
+        collection_name = f"sess_{session_id}"
+        try:
+            points = pickle.loads(file_bytes)
+            
+            # Пересоздаем коллекцию
+            try:
+                self.qdrant.delete_collection(collection_name)
+            except:
+                pass
+                
+            self.qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+            )
+            
+            # Заливаем обратно
+            if points:
+                batch_size = 100
+                for i in range(0, len(points), batch_size):
+                    self.qdrant.upsert(
+                        collection_name=collection_name,
+                        points=points[i : i + batch_size]
+                    )
+            
+            # Извлекаем уникальные имена файлов, чтобы восстановить UI
+            filenames = set()
+            for p in points:
+                if p.payload and "filename" in p.payload:
+                    filenames.add(p.payload["filename"])
+            
+            return len(points), list(filenames)
+            
+        except Exception as e:
+            print(f"Import error: {e}")
+            raise e
