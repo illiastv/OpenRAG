@@ -1,6 +1,6 @@
 import uuid
-import pickle  # <--- Добавлено для сохранения
-from typing import List, Dict, Any, Optional
+import pickle
+from typing import List, Optional
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchAny
@@ -9,12 +9,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 class ContextEngine:
     def __init__(self, openai_key: str):
-        # Всегда локальная память
         self.qdrant = QdrantClient(location=":memory:")
         self.openai = OpenAI(api_key=openai_key)
         self.embedding_model = "text-embedding-3-small"
         
-        # Настройщик нарезки текста
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
@@ -22,8 +20,7 @@ class ContextEngine:
         )
 
     def _get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        if not texts: 
-            return []
+        if not texts: return []
         try:
             clean_texts = [t.replace("\n", " ") for t in texts]
             resp = self.openai.embeddings.create(input=clean_texts, model=self.embedding_model)
@@ -33,19 +30,12 @@ class ContextEngine:
             return []
 
     def _extract_page_number(self, pdf_reader, page_index: int) -> int:
-        try:
-            return page_index + 1
-        except:
-            return page_index + 1
+        return page_index + 1
 
     def process_and_index(self, files, session_id: str):
         collection_name = f"sess_{session_id}"
-        
-        # Пересоздаем коллекцию
-        try:
-            self.qdrant.delete_collection(collection_name=collection_name)
-        except:
-            pass
+        try: self.qdrant.delete_collection(collection_name=collection_name)
+        except: pass
         
         self.qdrant.create_collection(
             collection_name=collection_name,
@@ -64,17 +54,13 @@ class ContextEngine:
                 if file_name.endswith('.pdf'):
                     pdf_reader = PdfReader(uploaded_file)
                     current_char_count = 0
-                    
                     for page_idx, page in enumerate(pdf_reader.pages):
                         page_text = (page.extract_text() or "") + "\n"
                         page_num = self._extract_page_number(pdf_reader, page_idx)
-                        
                         start_char = current_char_count
                         end_char = current_char_count + len(page_text)
-                        
                         for char_pos in range(start_char, end_char, 100):
                             page_mapping[char_pos] = page_num
-                        
                         text_content += page_text
                         current_char_count = end_char
                 else:
@@ -83,34 +69,22 @@ class ContextEngine:
                 print(f"Error reading {file_name}: {e}")
                 continue
 
-            if not text_content.strip():
-                continue
+            if not text_content.strip(): continue
 
             chunks = self.splitter.split_text(text_content)
             vectors = self._get_embeddings(chunks)
-            
-            if len(vectors) != len(chunks):
-                continue
             
             current_position = 0
             for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 page_num = None
                 if file_name.endswith('.pdf'):
-                    closest_pos = min(page_mapping.keys(), 
-                                      key=lambda x: abs(x - current_position),
-                                      default=None)
-                    if closest_pos:
-                        page_num = page_mapping[closest_pos]
+                    closest_pos = min(page_mapping.keys(), key=lambda x: abs(x - current_position), default=None)
+                    if closest_pos: page_num = page_mapping[closest_pos]
                 
                 all_points.append(PointStruct(
                     id=str(uuid.uuid4()),
                     vector=vector,
-                    payload={
-                        "text": chunk,
-                        "filename": file_name,
-                        "chunk_id": i,
-                        "page": page_num
-                    }
+                    payload={"text": chunk, "filename": file_name, "chunk_id": i, "page": page_num}
                 ))
                 total_chunks += 1
                 current_position += len(chunk)
@@ -118,10 +92,7 @@ class ContextEngine:
         if all_points:
             batch_size = 100
             for i in range(0, len(all_points), batch_size):
-                self.qdrant.upsert(
-                    collection_name=collection_name,
-                    points=all_points[i : i + batch_size]
-                )
+                self.qdrant.upsert(collection_name=collection_name, points=all_points[i : i + batch_size])
             
         return total_chunks
 
@@ -129,105 +100,45 @@ class ContextEngine:
         collection_name = f"sess_{session_id}"
         try:
             collections = self.qdrant.get_collections().collections
-            if not any(c.name == collection_name for c in collections):
-                return []
+            if not any(c.name == collection_name for c in collections): return []
             
             query_vector = self._get_embeddings([query])
-            if not query_vector:
-                return []
+            if not query_vector: return []
             
             query_filter = None
             if filter_files:
-                query_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="filename",
-                            match=MatchAny(any=filter_files)
-                        )
-                    ]
-                )
+                query_filter = Filter(must=[FieldCondition(key="filename", match=MatchAny(any=filter_files))])
             
-            hits = self.qdrant.query_points(
-                collection_name=collection_name,
-                query=query_vector[0],
-                limit=limit,
-                query_filter=query_filter
-            ).points
+            hits = self.qdrant.query_points(collection_name=collection_name, query=query_vector[0], limit=limit, query_filter=query_filter).points
             
-            return [
-                {
-                    "score": hit.score,
-                    "text": hit.payload["text"],
-                    "filename": hit.payload["filename"],
-                    "chunk_id": hit.payload["chunk_id"],
-                    "page": hit.payload.get("page", "?")
-                } 
-                for hit in hits
-            ]
+            return [{"score": hit.score, "text": hit.payload["text"], "filename": hit.payload["filename"], "page": hit.payload.get("page", "?"), "id": hit.id} for hit in hits]
         except Exception as e:
             print(f"Search error: {e}")
             return []
 
-    # === НОВЫЕ МЕТОДЫ ДЛЯ СОХРАНЕНИЯ ===
-    
     def export_index(self, session_id: str) -> bytes:
-        """Выгружает всю коллекцию в bytes (pickle)"""
         collection_name = f"sess_{session_id}"
         try:
-            # Получаем все точки из базы
             all_points = []
             offset = None
             while True:
-                points_batch, offset = self.qdrant.scroll(
-                    collection_name=collection_name,
-                    limit=1000,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=True
-                )
+                points_batch, offset = self.qdrant.scroll(collection_name=collection_name, limit=1000, offset=offset, with_payload=True, with_vectors=True)
                 all_points.extend(points_batch)
-                if offset is None:
-                    break
-            
+                if offset is None: break
             return pickle.dumps(all_points)
-        except Exception as e:
-            print(f"Export error: {e}")
-            return b""
+        except: return b""
 
     def import_index(self, session_id: str, file_bytes: bytes) -> tuple[int, List[str]]:
-        """Загружает коллекцию из bytes. Возвращает кол-во чанков и список имен файлов."""
         collection_name = f"sess_{session_id}"
         try:
             points = pickle.loads(file_bytes)
-            
-            # Пересоздаем коллекцию
-            try:
-                self.qdrant.delete_collection(collection_name)
-            except:
-                pass
-                
-            self.qdrant.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
-            )
-            
-            # Заливаем обратно
+            try: self.qdrant.delete_collection(collection_name)
+            except: pass
+            self.qdrant.create_collection(collection_name=collection_name, vectors_config=VectorParams(size=1536, distance=Distance.COSINE))
             if points:
                 batch_size = 100
                 for i in range(0, len(points), batch_size):
-                    self.qdrant.upsert(
-                        collection_name=collection_name,
-                        points=points[i : i + batch_size]
-                    )
-            
-            # Извлекаем уникальные имена файлов, чтобы восстановить UI
-            filenames = set()
-            for p in points:
-                if p.payload and "filename" in p.payload:
-                    filenames.add(p.payload["filename"])
-            
+                    self.qdrant.upsert(collection_name=collection_name, points=points[i : i + batch_size])
+            filenames = set(p.payload["filename"] for p in points if p.payload)
             return len(points), list(filenames)
-            
-        except Exception as e:
-            print(f"Import error: {e}")
-            raise e
+        except Exception as e: raise e
