@@ -1,11 +1,10 @@
 import React, { useState, useEffect, type ChangeEvent, type KeyboardEvent } from 'react';
-import { Search, Upload, Download, BookOpen, Trash2, CheckSquare, Square, X, FileText, Copy, Loader2, ChevronDown, ExternalLink } from 'lucide-react';
+import { Search, Upload, Download, BookOpen, Trash2, CheckSquare, Square, X, FileText, Copy, Loader2, ExternalLink } from 'lucide-react';
 import axios from 'axios';
 
-// --- КОНФИГУРАЦИЯ ---
-const API_URL = 'http://localhost:8001';
 
-// --- ТИПЫ ---
+const API_URL = '/api';
+
 interface FileItem {
   id: string;
   name: string;
@@ -33,7 +32,6 @@ interface ImportResponse {
 }
 
 const BookMindApp: React.FC = () => {
-  // Сессия
   const [sessionId] = useState<string>(() => {
     const saved = localStorage.getItem('session_id');
     const newId = Math.random().toString(36).substring(7);
@@ -44,7 +42,6 @@ const BookMindApp: React.FC = () => {
     localStorage.setItem('session_id', sessionId);
   }, [sessionId]);
 
-  // Состояния
   const [files, setFiles] = useState<FileItem[]>([]);
   const [activeFiles, setActiveFiles] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -53,9 +50,7 @@ const BookMindApp: React.FC = () => {
   
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [isIndexing, setIsIndexing] = useState<boolean>(false);
-  const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set());
 
-  // --- API ЗАПРОСЫ ---
 
   const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
@@ -97,7 +92,7 @@ const BookMindApp: React.FC = () => {
 
     } catch (error) {
       console.error("Upload failed:", error);
-      alert("Ошибка загрузки! Убедись, что Backend запущен на порту 8001.");
+      alert("Ошибка загрузки! Проверьте логи сервера.");
     } finally {
       setIsIndexing(false);
     }
@@ -176,7 +171,6 @@ const BookMindApp: React.FC = () => {
     }
   };
 
-  // --- UI ЛОГИКА ---
 
   const handleKeyPress = (e: KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'Enter') handleSearch();
@@ -203,15 +197,6 @@ const BookMindApp: React.FC = () => {
     });
   };
 
-  const toggleExpanded = (id: string): void => {
-    setExpandedResults(prev => {
-      const newExpanded = new Set(prev);
-      if (newExpanded.has(id)) newExpanded.delete(id);
-      else newExpanded.add(id);
-      return newExpanded;
-    });
-  };
-
   const copyToClipboard = (text: string): void => {
     navigator.clipboard.writeText(text);
   };
@@ -222,7 +207,6 @@ const BookMindApp: React.FC = () => {
     setSearchResults([]);
     setSearchQuery('');
     setSelectedResult(null);
-    setExpandedResults(new Set());
   };
 
   return (
@@ -272,7 +256,6 @@ const BookMindApp: React.FC = () => {
                 <div className="text-center py-20 text-[#7890ab]">
                   <Upload className="w-16 h-16 mx-auto mb-4 opacity-30" />
                   <p className="text-sm">Empty Library</p>
-                  {/* ИСПРАВЛЕНА ОШИБКА ЗДЕСЬ: */}
                   <p className="text-xs mt-2 opacity-70">Upload PDF files --&gt;</p>
                 </div>
               ) : (
@@ -331,7 +314,6 @@ const BookMindApp: React.FC = () => {
               ) : (
                 <div className="max-w-4xl mx-auto space-y-4">
                   {searchResults.map((result) => {
-                    const isExpanded = expandedResults.has(result.id);
                     return (
                       <div key={result.id} className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 hover:border-[#667eea]/30 transition overflow-hidden">
                         <div className="p-5 border-b border-white/10 flex justify-between items-start">
