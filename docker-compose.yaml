@@ -1,17 +1,17 @@
-version '3.8'
+version: '3.8'
 
 services:
   backend:
     build: ./backend
-    container_name: openrag-backend
+    container_name: openrag_backend
     restart: always
-    enviroment:
+    environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-  
 
   frontend:
     build: ./frontend
-    container_name: openrag-frontend
+    container_name: openrag_frontend
+    restart: always
     ports:
       - "8888:80"
     depends_on:
