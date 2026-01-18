@@ -142,3 +142,82 @@ class ContextEngine:
             filenames = set(p.payload["filename"] for p in points if p.payload)
             return len(points), list(filenames)
         except Exception as e: raise e
+
+    def get_files(self, session_id: str) -> List[dict]:
+        """Отримати список всіх файлів з кількістю chunks"""
+        collection_name = f"sess_{session_id}"
+        try:
+            collections = self.qdrant.get_collections().collections
+            if not any(c.name == collection_name for c in collections):
+                return []
+            
+            file_stats = {}
+            offset = None
+            while True:
+                points_batch, offset = self.qdrant.scroll(
+                    collection_name=collection_name,
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                for point in points_batch:
+                    filename = point.payload.get("filename", "unknown")
+                    if filename not in file_stats:
+                        file_stats[filename] = {"chunks": 0, "chunk_ids": []}
+                    file_stats[filename]["chunks"] += 1
+                    chunk_id = point.payload.get("chunk_id")
+                    if chunk_id is not None:
+                        file_stats[filename]["chunk_ids"].append(chunk_id)
+                if offset is None:
+                    break
+            
+            result = []
+            for filename, stats in file_stats.items():
+                result.append({
+                    "filename": filename,
+                    "chunks_count": stats["chunks"],
+                    "chunk_ids": sorted(set(stats["chunk_ids"]))
+                })
+            return result
+        except Exception as e:
+            print(f"Get files error: {e}")
+            return []
+
+    def get_file_chunks(self, session_id: str, filename: str) -> List[dict]:
+        """Отримати всі chunks для конкретного файлу"""
+        collection_name = f"sess_{session_id}"
+        try:
+            collections = self.qdrant.get_collections().collections
+            if not any(c.name == collection_name for c in collections):
+                return []
+            
+            query_filter = Filter(must=[FieldCondition(key="filename", match={"value": filename})])
+            chunks = []
+            offset = None
+            while True:
+                points_batch, offset = self.qdrant.scroll(
+                    collection_name=collection_name,
+                    limit=1000,
+                    offset=offset,
+                    query_filter=query_filter,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                for point in points_batch:
+                    chunks.append({
+                        "id": point.id,
+                        "chunk_id": point.payload.get("chunk_id", 0),
+                        "text": point.payload.get("text", ""),
+                        "filename": point.payload.get("filename", filename),
+                        "page": point.payload.get("page")
+                    })
+                if offset is None:
+                    break
+            
+            # Сортуємо по chunk_id
+            chunks.sort(key=lambda x: x["chunk_id"])
+            return chunks
+        except Exception as e:
+            print(f"Get file chunks error: {e}")
+            return []

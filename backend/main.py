@@ -1,6 +1,7 @@
 import os
 from typing import List
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from urllib.parse import unquote
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -94,5 +95,22 @@ async def import_index(session_id: str = Form(...), file: UploadFile = File(...)
         content = await file.read()
         count, filenames = engine.import_index(session_id, content)
         return {"status": "success", "chunks_loaded": count, "filenames": filenames}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files")
+async def get_files(session_id: str):
+    try:
+        files = engine.get_files(session_id)
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files/{filename}/chunks")
+async def get_file_chunks(filename: str, session_id: str = Query(...)):
+    try:
+        decoded_filename = unquote(filename)
+        chunks = engine.get_file_chunks(session_id, decoded_filename)
+        return {"chunks": chunks}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
