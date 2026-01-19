@@ -1,11 +1,59 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Search, Upload, FolderOpen, FileText, Code, ChevronRight, ChevronDown,
-  Loader2, X, Eye, Send, FileCode, Layers, GitBranch
+  Loader2, X, Eye, Send, FileCode, Layers, GitBranch, CheckSquare, Square
 } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = '/api';
+
+// Список системних папок та файлів, які не обираються по дефолту
+const SYSTEM_PATTERNS = [
+  'node_modules',
+  '.git',
+  '.vscode',
+  '.idea',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  'venv',
+  'env',
+  '.env',
+  'dist',
+  'build',
+  '.next',
+  '.nuxt',
+  '.cache',
+  'coverage',
+  '.nyc_output',
+  '.sass-cache',
+  '.parcel-cache',
+  '.turbo',
+  '.DS_Store',
+  'Thumbs.db',
+  '.gitignore',
+  '.gitattributes',
+  '.editorconfig',
+  '.prettierignore',
+  '.eslintignore',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  '.npm',
+  '.yarn',
+];
+
+const isSystemPath = (path: string): boolean => {
+  const parts = path.split(/[/\\]/);
+  return parts.some(part => {
+    // Перевіряємо точну відповідність або початок з крапки
+    return SYSTEM_PATTERNS.some(pattern => 
+      part === pattern || 
+      part.toLowerCase() === pattern.toLowerCase() ||
+      (pattern.startsWith('.') && part.startsWith('.'))
+    );
+  });
+};
 
 interface FileItem {
   name: string;
@@ -165,7 +213,7 @@ const OpenRAGApp: React.FC = () => {
     files.forEach((file) => {
       // Використовуємо webkitRelativePath якщо доступний, інакше name
       const filePath = (file as any).webkitRelativePath || file.name;
-      const parts = filePath.split(/[/\\]/).filter(p => p);
+      const parts = filePath.split(/[/\\]/).filter((p: string) => p);
       let currentPath = '';
       
       parts.forEach((part: string, index: number) => {
@@ -239,6 +287,26 @@ const OpenRAGApp: React.FC = () => {
     sortChildren(rootItems);
     
     setLocalFileTree(rootItems);
+    
+    // Автоматично обираємо всі файли, крім системних
+    const getAllNonSystemFilePaths = (items: FileItem[]): string[] => {
+      const paths: string[] = [];
+      items.forEach(item => {
+        if (item.type === 'file' && !item.isIndexed && item.file) {
+          // Пропускаємо системні файли
+          if (!isSystemPath(item.path)) {
+            paths.push(item.path);
+          }
+        }
+        if (item.children) {
+          paths.push(...getAllNonSystemFilePaths(item.children));
+        }
+      });
+      return paths;
+    };
+    
+    const nonSystemPaths = getAllNonSystemFilePaths(rootItems);
+    setSelectedFiles(new Set(nonSystemPaths));
     
     // Очищаємо input
     e.target.value = '';
@@ -387,6 +455,31 @@ const OpenRAGApp: React.FC = () => {
     });
   };
 
+  const selectAllLocalFiles = () => {
+    const getAllLocalFilePaths = (items: FileItem[]): string[] => {
+      const paths: string[] = [];
+      items.forEach(item => {
+        if (item.type === 'file' && !item.isIndexed && item.file) {
+          // Пропускаємо системні файли
+          if (!isSystemPath(item.path)) {
+            paths.push(item.path);
+          }
+        }
+        if (item.children) {
+          paths.push(...getAllLocalFilePaths(item.children));
+        }
+      });
+      return paths;
+    };
+    
+    const allPaths = getAllLocalFilePaths(localFileTree);
+    setSelectedFiles(new Set(allPaths));
+  };
+
+  const deselectAllFiles = () => {
+    setSelectedFiles(new Set());
+  };
+
   const renderFileTree = (items: FileItem[], isIndexed: boolean, level: number = 0): React.ReactNode => {
     return items.map(item => {
       const isExpanded = expandedPaths.has(item.path);
@@ -397,8 +490,6 @@ const OpenRAGApp: React.FC = () => {
         <div key={item.path}>
           <div
             className={`flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 ${
-              item.type === 'file' ? 'cursor-pointer' : ''
-            } ${
               isSelected ? 'bg-[#667eea]/20' : ''
             }`}
             style={{ paddingLeft: `${level * 16 + 8}px` }}
@@ -414,16 +505,31 @@ const OpenRAGApp: React.FC = () => {
               <div className="w-4" />
             )}
             
+            {/* Кнопка вибору для файлів */}
+            {item.type === 'file' && !isIndexed && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleFileSelection(item.path);
+                }}
+                className="text-[#667eea] hover:text-[#764ba2] transition"
+                title={isSelected ? 'Зняти вибір' : 'Обрати для відправки в RAG'}
+              >
+                {isSelected ? (
+                  <CheckSquare className="w-4 h-4" />
+                ) : (
+                  <Square className="w-4 h-4" />
+                )}
+              </button>
+            )}
+            
             {item.type === 'folder' ? (
               <FolderOpen className="w-4 h-4 text-[#667eea]" />
             ) : (
               <FileCode className="w-4 h-4 text-[#f093fb]" />
             )}
             
-            <span
-              className="flex-1 text-sm text-[#b4c2d9] truncate"
-              onClick={() => item.type === 'file' && !isIndexed && toggleFileSelection(item.path)}
-            >
+            <span className="flex-1 text-sm text-[#b4c2d9] truncate">
               {item.name}
             </span>
             
@@ -436,15 +542,15 @@ const OpenRAGApp: React.FC = () => {
                 )}
                 {item.isIndexed && (
                   <button
-                    onClick={() => handleViewChunks(item.path)}
-                    className="text-[#667eea] hover:text-[#764ba2]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleViewChunks(item.path);
+                    }}
+                    className="text-[#667eea] hover:text-[#764ba2] transition"
                     title="Переглянути chunks"
                   >
                     <Eye className="w-4 h-4" />
                   </button>
-                )}
-                {!isIndexed && isSelected && (
-                  <div className="w-2 h-2 rounded-full bg-[#667eea]" />
                 )}
               </>
             )}
@@ -531,7 +637,25 @@ const OpenRAGApp: React.FC = () => {
                 <div className="space-y-1">
                   {localFileTree.length > 0 && (
                     <div className="mb-4">
-                      <div className="text-xs text-[#667eea] font-semibold mb-2 px-2">Локальні файли (не індексовані)</div>
+                      <div className="flex items-center justify-between mb-2 px-2">
+                        <div className="text-xs text-[#667eea] font-semibold">Локальні файли (не індексовані)</div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={selectAllLocalFiles}
+                            className="text-xs text-[#667eea] hover:text-[#764ba2] px-2 py-1 rounded hover:bg-white/5 transition"
+                            title="Обрати всі"
+                          >
+                            Всі
+                          </button>
+                          <button
+                            onClick={deselectAllFiles}
+                            className="text-xs text-[#7890ab] hover:text-white px-2 py-1 rounded hover:bg-white/5 transition"
+                            title="Зняти вибір"
+                          >
+                            Нічого
+                          </button>
+                        </div>
+                      </div>
                       {renderFileTree(localFileTree, false)}
                     </div>
                   )}
@@ -626,7 +750,7 @@ const OpenRAGApp: React.FC = () => {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {chunks.map((chunk, idx) => (
+                        {chunks.map((chunk) => (
                           <div
                             key={chunk.id}
                             className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 hover:border-[#667eea]/30 transition overflow-hidden cursor-pointer"
