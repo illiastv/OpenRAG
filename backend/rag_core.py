@@ -34,13 +34,16 @@ class ContextEngine:
 
     def process_and_index(self, files, session_id: str):
         collection_name = f"sess_{session_id}"
-        try: self.qdrant.delete_collection(collection_name=collection_name)
-        except: pass
         
-        self.qdrant.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
-        )
+        # Перевіряємо чи колекція існує, якщо ні - створюємо
+        collections = self.qdrant.get_collections().collections
+        collection_exists = any(c.name == collection_name for c in collections)
+        
+        if not collection_exists:
+            self.qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+            )
 
         all_points = []
         total_chunks = 0
