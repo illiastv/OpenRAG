@@ -7,12 +7,20 @@ services:
     restart: always
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - openrag_network
 
   frontend:
     build: ./frontend
     container_name: openrag_frontend
     restart: always
     ports:
-      - "8888:80"
+      - "5555:80"
     depends_on:
       - backend
+    networks:
+      - openrag_network
+
+networks:
+  openrag_network:
+    driver: bridge
